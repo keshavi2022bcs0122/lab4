@@ -18,15 +18,3 @@ def predict(data: WineFeatures):
         "roll_no": "2022BCS0122",
         "wine_quality": int(prediction[0])
     }
-```
-
----
-
-### `requirements.txt` — same as your Lab 3
-```
-fastapi
-uvicorn
-scikit-learn
-numpy
-joblib
-python-multipart
