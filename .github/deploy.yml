@@ -1,0 +1,108 @@
+name: Train and Deploy Wine Quality Model
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  train:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          pip install scikit-learn pandas numpy joblib
+
+      - name: Train model
+        run: |
+          python scripts/train.py
+
+      - name: Read metrics
+        id: metrics
+        run: |
+          R2=$(python -c "import json; d=json.load(open('metrics.json')); print(d['R2'])")
+          MSE=$(python -c "import json; d=json.load(open('metrics.json')); print(d['MSE'])")
+          echo "r2=$R2" >> $GITHUB_OUTPUT
+          echo "mse=$MSE" >> $GITHUB_OUTPUT
+
+      - name: Upload model and metrics
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-artifact
+          path: |
+            model.pkl
+            metrics.json
+
+    outputs:
+      r2: ${{ steps.metrics.outputs.r2 }}
+      mse: ${{ steps.metrics.outputs.mse }}
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: train
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download model artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: model-artifact
+
+      - name: Compare metrics and decide
+        id: compare
+        run: |
+          CURRENT_R2="${{ needs.train.outputs.r2 }}"
+          BEST_R2="${{ vars.BEST_R2 }}"
+          echo "Current R2: $CURRENT_R2"
+          echo "Best R2 so far: $BEST_R2"
+          IMPROVED=$(python3 -c "print('true' if float('$CURRENT_R2') > float('$BEST_R2') else 'false')")
+          echo "improved=$IMPROVED" >> $GITHUB_OUTPUT
+          if [ "$IMPROVED" = "false" ]; then
+            echo "2022BCS0122----Metric did not improve"
+          fi
+
+      - name: Log in to Docker Hub
+        if: steps.compare.outputs.improved == 'true'
+        uses: docker/login-action@v2
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Docker image
+        if: steps.compare.outputs.improved == 'true'
+        run: |
+          docker build -t ${{ secrets.DOCKERHUB_USERNAME }}/wine_predict_2022bcs0122:v2 .
+
+      - name: Push Docker image
+        if: steps.compare.outputs.improved == 'true'
+        run: |
+          docker push ${{ secrets.DOCKERHUB_USERNAME }}/wine_predict_2022bcs0122:v2
+
+      - name: Update BEST_R2 in GitHub Variables
+        if: steps.compare.outputs.improved == 'true'
+        run: |
+          curl -s -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/variables/BEST_R2 \
+            -d "{\"name\":\"BEST_R2\",\"value\":\"${{ needs.train.outputs.r2 }}\"}"
+
+      - name: Update BEST_MSE in GitHub Variables
+        if: steps.compare.outputs.improved == 'true'
+        run: |
+          curl -s -X PATCH \
+            -H "Authorization: Bearer ${{ secrets.GH_PAT }}" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/${{ github.repository }}/actions/variables/BEST_MSE \
+            -d "{\"name\":\"BEST_MSE\",\"value\":\"${{ needs.train.outputs.mse }}\"}"
